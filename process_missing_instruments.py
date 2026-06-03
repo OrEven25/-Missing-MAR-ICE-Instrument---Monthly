@@ -292,7 +292,7 @@ def main() -> None:
             log.warning("  → No Excel attachment found in: %s", subject)
 
     log.info(
-        "Done. Processed=%d  Skipped=%d  CSVs saved=%d",
+        "Done. Examined=%d  Skipped=%d  CSVs saved=%d",
         processed + skipped,
         skipped,
         len(collected_csvs),
