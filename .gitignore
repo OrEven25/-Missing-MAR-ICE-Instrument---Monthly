@@ -1,0 +1,14 @@
+# Credentials - never commit
+graph_config.py
+outlook_agent_token_cache.bin
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
