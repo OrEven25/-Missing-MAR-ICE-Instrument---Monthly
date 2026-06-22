@@ -1027,19 +1027,50 @@ for tc_id, name, scope, description in TC_REGISTRY:
                                        "best_bid", "best_ask", "inversion_spread"]
                            if c in disp17.columns]
                 ins_filter = st.selectbox(
-                    f"🔎 Filter TC17 by INS_TYPE",
+                    "🔎 Filter TC17 by INS_TYPE",
                     ["All"] + sorted(df["INS_TYPE"].dropna().unique().tolist()),
                     key=f"filter_{tc_id}",
                 )
                 view_df = disp17[show17] if show17 else disp17
                 if ins_filter != "All":
                     view_df = view_df[view_df["INS_TYPE"] == ins_filter]
-                # Ensure full TRAN_DATETIME string is shown
                 if "TRAN_DATETIME" in view_df.columns:
                     view_df = view_df.copy()
                     view_df["TRAN_DATETIME"] = view_df["TRAN_DATETIME"].astype(str)
-                st.dataframe(view_df.head(2000), use_container_width=True, hide_index=True, height=400)
+
+                # Row-selection: click a row → send ORIG_TRAN_ID to Trading Activity
+                st.caption("👆 Click a row to select it, then use the button below to view it on the Trading Activity chart.")
+                evt = st.dataframe(
+                    view_df.head(2000).reset_index(drop=True),
+                    use_container_width=True, hide_index=True, height=400,
+                    on_select="rerun", selection_mode="single-row",
+                )
                 st.caption(f"Showing {min(len(view_df), 2000):,} of {len(disp17):,} bid-side violations")
+
+                # Handle row selection
+                selected_rows = evt.selection.get("rows", []) if hasattr(evt, "selection") else []
+                if selected_rows:
+                    _sel = view_df.iloc[selected_rows[0]]
+                    st.session_state["tc17_focus_id"]  = _sel["ORIG_TRAN_ID"]
+                    st.session_state["tc17_focus_ins"] = _sel["INS_TYPE"]
+                    st.session_state["sel_exchange"]   = sel_exchange
+                    st.session_state["sel_date"]       = sel_date
+                    _fa, _fb = st.columns([3, 1])
+                    _fa.success(
+                        f"🎯 Selected: **{_sel['ORIG_TRAN_ID']}**  |  "
+                        f"INS_TYPE: `{_sel['INS_TYPE']}`  |  "
+                        f"Time: {_sel['TRAN_DATETIME']}"
+                    )
+                    with _fb:
+                        st.page_link(
+                            "pages/4_Trading_Activity.py",
+                            label="📈 View in Trading Activity →",
+                        )
+                elif st.session_state.get("tc17_focus_id"):
+                    st.info(
+                        f"🎯 Currently focused: **{st.session_state['tc17_focus_id']}** "
+                        f"— navigate to Trading Activity to see it highlighted."
+                    )
             else:
                 show_cols = [c for c in ["ORIG_TRAN_ID", "SORT_ID", "TRAN_STATUS",
                                           "TRAN_DATETIME", "COUNTRY", "MARKET_AREA",
