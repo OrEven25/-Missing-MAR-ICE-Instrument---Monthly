@@ -1,0 +1,850 @@
+Document Information
+Revision History
+Copyright © 2023, All rights reserved.
+This material includes the confidential and/or proprietary information of CubeLogic, is for the sole use of the intended recipient, and may be subject to the terms and conditions of a license agreement.  Without the express written consent of CubeLogic and except as specifically authorized pursuant to a license agreement, no part of this material may be reproduced or transmitted in any form or by any means, electronic or mechanical, including photocopying, recording, or facsimile, for any purpose other than for the recipient’s internal use.
+Disclaimer
+Purpose
+Herewith the specifications with which the CubeWatchTS Nord Pool standard interface has been developed are documented. The task of the Nord Pool interface is to capture the available data in the API interface of Nord Pool in terms of Intraday Orders and Trades prior to their physical delivery.
+The intraday markets are open 24/7, 365 days a year offering 15-minute, 30-minute, hourly and block products.
+High Level Architecture Diagram
+Design
+There are three major components in the design.
+API Connector– Reads messages from Nord Pool API using STOMP protocol through WebSocket connection and saves the data from subscribed topics to parquet file per contract.
+Parser – Parses data from the API connector in the parquet files(only for contracts with private orders and trades if “IsProcessingOnlyRelevantContracts” flag is set) and maps them to order and trade data structures and pushes them to order and trades parquet files to be pushed to database.
+Persist – Reads the orders and trades parquet files and persists them to the database.
+Nord Pool Communication Protocol
+The Nord Pool Intraday Trading Platform can be accessed by the streaming SockJS/WebSocket API using a STOMP protocol supported by a REST API for data intensive operations (like historical data).
+SockJS protocol:
+http://sockjs.github.io/sockjs-protocol/sockjs-protocol-0.3.3.html
+STOMP protocol:
+https://stomp.github.io/index.html
+Data transfer objects for the Intraday API are available in GitHub:
+https://github.com/NordPool/public-intraday-api
+  Source code examples to quickly connect to Nord Pool:
+For Java (Spring-based):
+https://github.com/NordPool/public-intraday-api-example
+For .NET:
+https://github.com/NordPool/public-intraday-api-net-example
+SockJs Implementation
+1. Compose the Intraday API endpoint address in form of /user/{serverId}/{sessionId}/websocket 
+user is the URL of the endpoint.
+ServerId is a client-generated random number between 000-999 presented in the 3-digit form.
+SessionId is a client-generated random string unique for each session. Use the length of 10-20 symbols.
+SockJS server emits messages that start from "frame letter", in relevant cases followed by the payload of the frame. From the SockJS protocol description:
+o - Open frame. Every time a new session is established, the server must immediately send the open frame. This is required, as some protocols (mostly polling) can't distinguish between a properly established connection and a broken one - we must convince the client that it is indeed a valid URL and it can be expecting further messages in the future on that url.
+h - Heartbeat frame. Most loadbalancers have arbitrary timeouts on connections. In order to keep connections from breaking, the server must send a heartbeat frame every now and then. The typical delay is 25 seconds and should be configurable.
+a - Array of json-encoded messages. For example: a["message"].
+c - Close frame. This frame is sent to the browser every time the client asks for data on closed connection. This may happen multiple times. Close frame contains a code and a string explaining a reason of closure, like: c[3000,"Go away!"]
+SockJS client does not have to use any "frame letters":
+SockJS server does not have any framing defined. All incoming data is treated as incoming messages, either single json-encoded messages or an array of json-encoded messages, depending on transport. For our case, please see section 3 below.
+2. Open a Websocket connection to the Intraday API endpoint.
+After a successful connection, the server will send back an o frame. Once it is received, you can consider connection confirmed.
+Depending on the version of SockJS on the server side, the server will also send heartbeat frames h. The server sends these frames to keep the connection alive. This can be ignored on the client's side.
+3. Messages received from the server are a-denoted frames. The payload of the message is a JSON array with an escaped string inside (a STOMP packet, in our case). An example of a SockJS coded STOMP message with some headers and JSON payload: 
+a["MESSAGE\\ncontent-length:232\\n\\content-type:application/json\\n\\n{\"property\":\"value\"}\u0000"]
+4. Messages sent to server should be:
+converted to a JSON string - with escaped special character representation and appended by \u0000 symbol.
+then wrapped in a JSON array.
+For example, for sending the STOMP Connect command, the SockJS+STOMP message will look like: 
+["CONNECT\\nX-AUTH-TOKEN:token\\n\\n\u0000"]
+API Description
+The API uses a subscription model based on “topics”. To receive a particular kind of information, the user subscribes to a necessary topic that may include variable parameters. All subscription topics are independent and can be used simultaneously as soon as the subscription is permitted. To re-subscribe, the user must execute STOMP UNSUBSCRIBE and SUBSCRIBE again.
+API uses a subset of commands from the STOMP protocol.
+After a successful subscription, data streaming to the client will commence. All subscription streams follow the same convention of sending first a “snapshot” of the current data. Subsequent changes are then sent in the form of “deltas” when only the information that has changed is distributed.
+STOMP headers of most messages contain an x-nps-snapshot field that may be true or false, indicating that the message contains respectively snapshot or delta. If this field is absent, the message should be regarded as delta.
+The backend may send a full snapshot between delta messages, although we expect a seldom need for this. When this occurs, the client should overwrite all previously persisted data from the subscription with the information received from the new snapshot.
+All messages are encoded in JSON format.
+Optionally, the user can choose to use compressed format for messages, that is simply done by adding /gzip suffix to a subscription topic. Then, the payload of the message will be pre-compressed using gzip and base-64 encoded, so the client should perform a de-compression. 
+Client (user) can log in maximum 10 times per twenty seconds and not more than 20 times per twenty minutes. The limit is per username.
+Most subscriptions come in two types:
+Conflated – we generate new deltas every 0.25 seconds. All updates received during this interval are sent as one message. If several updates happen to the same entity, only the latest state is provided. Generates less load on a client but increases the latency.
+Streaming – all individual updates are sent immediately. A client should be able to handle this traffic.
+Each message will be enriched with a topic-specific sequence number so that the client can easily follow up on any missed messages. It is stored in x-nps-sequenceNo STOMP header. The topic-specific numbering means, that if two instances of a client subscribe at a different time to the same topic, they will receive the same delta sequence numbers, as deltas are broadcast to all topic's subscribers simultaneously.
+An additional check must be made by comparing the observed x-nps-sequenceNo with the information provided by the /heartbeatping subscription. If either check fails, it is strongly recommended to unsubscribe and re-subscribe to the topic to receive fresh snapshots to guarantee that the received data remains consistent.
+Login and Logout
+Communication with the API happens within a WebSocket/STOMP session.
+To start/end the session the client needs to log in/log out. SSO Server provides unique Authorization Token for each user. Basic Authentication to SSO Server is required that uses clientId and clientSecret properties. 
+To remain connected continuously, the authentication token must be updated before its expiration time.
+During the session, Heartbeat ping messages will be sent every 15 seconds from the server to allow message sequencing checks.
+The initial step in connecting to a server is to obtain an authentication token. 
+SSO endpoint: https://sts.test.nordpoolgroup.com/connect/token
+Shell authentication: 
+curl -k -H "Authorization: Basic Y2xpZW50X2ludHJhZGF5X2FwaToxeEI5SWsxeHNFdTJuYndWYTFCUg==" -H "Content-Type:application/x-www-form-urlencoded" -X POST -d "grant_type=password&scope=auction_api&username=[USERNAME]&password=[PASSWORD]"  https://sts.nordpoolgroup.com/connect/token
+The user must then use STOMP CONNECT to connect to the server and log in. Login and password are not required. Instead, a custom STOMP header field X-AUTH-TOKEN must contain the authentication token.
+An authentication token has a finite period of validity. Once it expires, the client is disconnected. In order to keep connection uninterrupted, you should obtain a new token before the old one expires and perform a token refresh, so the new token's validity period will be in effect.
+The current expiration time of a token is 60 minutes.
+To perform SSO token refresh client should:
+1) Obtain a new token from SSO via the same REST call.
+2) SEND the following message to //command topic:
+{
+"type":"TOKEN_REFRESH",
+"oldToken":"HUGE_STRING_OLD_TOKEN",
+"newToken":"HUGE_STRING_NEW_TOKEN"
+}
+Where "HUGE_STRING_OLD_TOKEN" and "HUGE_STRING_NEW_TOKEN" denote the actual tokens, old and new.
+To log out, a client should SEND the following message to //command topic:
+{  
+   "type":"LOGOUT"
+}
+Units
+The trading unit quantity in Nord Pool’s Intraday Platform is kW (kilowatt).
+Currencies are quoted in minor currency units (Euro cents, pence) – this means there are no decimals used and prices should be submitted as integer values.
+Euros should be expressed in cents; to submit an order for 1.50 EUR the price value submitted via the API should be 150.
+UK Pounds should be handled as pence; for an order of 4.75 GBP the value should be 475.
+Date and Time: all dates and times used in the API messages are in ISO 8601 format and always UTC (ZULU) time indicated by 'Z' in the end of the timestamp, e.g.: 2016-12-13T11:08:35Z
+Countries: use ISO 3166-1 alpha-2 format.
+Currency: use ISO 4271 format.
+Product specifications
+Trade Lot: 0,1 MW
+Tick Size: Euro/GBP 0,01/MWh
+Currency: Euro /GBP
+Order Types: (a) Limit, (b) Fill-or-Kill Order, (c) Immediate-or-Cancel, (d) Iceberg Order (minimum Clip Size 5 MW),
+Lower Technical Order Price Limit: Euro/GBP -9 999
+Upper Technical Order Price Limit: Euro/BGP +9 999
+Gate opening times and gate closure times change. Timeline can be found here.
+Nord Pool offers both local and SIDC contracts for trading.
+The following IDs have different values for XBID and local markets:
+The following IDs are going to have different prefixes for XBID:
+Business Process
+Login / TokenRefresh
+Token refresh worker connects to Nord Pool’s rest endpoint to get the token and pushes it to the in-memory queue. It gets a new token every time it exceeds the configurable token refresh time.
+The API Connector waits until it gets the token from the Token Queue and sends a WebSocket connection request to Login to Nord Pool WebSocket endpoint. It receives a Connected message from Nord Pool once the connection is successful.
+API Connector also sends a TokenRefresh message whenever the token queue sends a new token.
+Configuration
+Once the Login is successful, we send a Subscribe message to the configuration topic as shown below:
+“/user/<username>/<version>/configuration”
+We receive the configuration information from Nord Pool in JSON format as shown below.
+{  
+   "throttlingLimit":[1, 2],
+   "portfolios":[  
+      {  
+         "id":"Z00001-8",
+         "name":"TestPortfolioName2",
+         "shortName":"portfolioName2",
+         "companyId":"Z00001",
+         "permission" : "WRITE",
+         "validFrom":"2017-03-31T08:19:37.807Z",
+         "validTo":"2017-12-20T08:19:37.807Z",
+         "deleted":false,
+         "state":"ACTI",
+         "currency":"EUR",
+         "areas":[  
+            {  
+               "areaId":1,
+               "validFrom":"2017-03-31T08:19:37.807Z",
+               "validTo":"2017-12-20T08:19:37.807Z"
+            }
+         ],
+         "markets":[  
+            {  
+               "marketId":""
+            }
+         ]
+      }
+   ],
+  "companyUsers" :         {
+            "fe999655-98f7-4548-8h42-174e7c8ecde0" : "company_user_1",
+            "dd70bfa9-9da0-44ce-b340-be9fccdcd7b7" : "some_user_2"
+        }
+}
+Subscription
+Once we receive configuration information, we send a Subscribe message to several topics of interest.
+On a successful subscription we start receiving messages for that subscription which we push to in memory queue to not hold the next message till we process this message.
+We have a worker that reads from the in-memory queue and writes it to parquet files.
+Parser reads from the above parquet files parses the data and creates a zip file with orders and trades parquet files. Persist service reads the zip files and dumps the data into the database.
+Subscription message will be in the below format for respective topic.
+/user/<username>/<version>/<streaming>/<topic>/<areaId>
+On subscription the initial message is a snapshot and further message we receive the deltas.
+For snapshot messages for orders and trades we send the snapshot flag to remove the duplicates while parsing the data.
+Subscriptions
+/configuration – Current API users configuration information
+/localview – Public orders
+/orderExecutionReport – Private orders
+/ticker – Public trades
+/privateTrade – Private trades
+/contracts – Open contracts information 
+/deliveryAreas – Delivery areas information
+/heartbeatping – To get heartbeat information for above subscriptions
+Logout / Reconnection / Error handling
+We send a Disconnect STOMP message (Logout message) through the WebSocket connection when the adapter is stopped and close the WebSocket connection.
+If any process in adapter fails, it waits for a minute and tries reconnecting again and followed by resubscribe on successful connection.
+While parsing the messages if there is a failure and the application stops, we can reprocess the data for that day as mentioned in the operations guide.
+We send a resubscribe message for a specific topic when there is a sequence mismatch while receiving the messages in API connector.
+Handshake
+We write a handshake once the persist service saves the data for a day.
+If we must rerun data for a day, we must delete the entry from CLIENT_HANDSHAKE table and rerun the data for the day.
+API Configuration and input data structure
+Following in this chapter, a brief explanation of all the different subscriptions used by the Nord Pool adapter and their data structure.
+/configuration
+The Configuration topic is used to receive user's authorization and permission details and subsequent updates on these. The configuration message contains the list of allowed portfolios, market areas, and throttling limits. Access rights are time-dependent and both portfolios and areas have time-based validity restrictions.
+Should user rights have changed, a new set of rights will be distributed via the topic, replacing any previous rights. All attempts to use portfolios and areas that are not in the list will be ignored by the server.
+Subscription topic: /user/<username>/<version>/configuration
+Configuration subscription does not use // part of the subscription topic.
+Example: /user//v1/configuration.
+Fields descriptions:
+Portfolios sub-array field descriptions:
+/deliveryAreas
+Provides a list of delivery areas available in the Intraday Platform.
+Subscription topic: /user/<username>/<version>/<streaming>/deliveryAreas
+Fields description:
+/contracts
+Provides all contracts available to trade for the specified user.
+Subscription topic: /user/<username>/<version>/<streaming>/contracts
+Fields description:
+/publicStatistics
+Provides a list of contracts available in the area with id and aggregated statistical data for each contract.
+Subscription topic: /user/<username>/v1/<conflated>/publicStatistics/<deliveryAreaId>
+ /localview
+Provides local views for given area. The orders are sorted as "best orders first". Data is sorted based on our "best order first" criteria in the snapshot.
+When the client receives the delta, they only consist of changed elements for the contract. For instance, you already had orders I1,I2, I3 in the OD and you have now the situation that I4 and I5 are added. The delta will contain only I4 and I5.
+If some elements are to be removed, they should contain field deleted=true and may not contain qty field.
+Subscription topic: /user/<username>/<version>/<streaming>/localview/<areaId>
+Field descriptions:
+For each contract, the following set of fields is provided:
+Basic data for Buy and Sell orders has the following fields:
+/ticker
+Provides information about "public trades", aka ticker.
+As a snapshot, the last 2000 public trades are sent. Historical trades exceeding that limit must be requested via a separate REST interface.
+Subscription topic: /user/<username>/<version>/<streaming>/ticker
+Field description:
+Legs:
+/orderExecutionReport
+In response to an order creation or modification request and for any order updates, the Intraday Platform will send an Order Execution Report message.
+When subscription takes place, the user will receive a snapshot with his/her last 20 000 order events. Historical orders exceeding that limit must be requested via a separate REST call.
+Custom limit can also be applied by using the following format (in this example the limit is set to 100):
+  /user/<USERNAME>/v1/conflated/orderExecutionReport/100
+Order events with the following OrderAction values will not be included in the snapshot:
+FULL_EXECUTION, SYSTEM_EXPIRED, SYSTEM_DELETED, USER_DELETED
+Order events with the following OrderAction values will be included in the snapshot:
+USER_ADDED, USER_HIBERNATED, USER_MODIFIED, SYSTEM_HIBERNATED, SYSTEM_MODIFIED, PARTIAL_EXECUTION, ICEBERG_SLICE_ADDED
+Delta messages will include both valid orders and real-time error messages for the requests that were rejected by the trading platform.
+Subscription topic: /user/<username>/<version>/<streaming>/orderExecutionReport
+Field descriptions:
+Additionally, the following fields may be present:
+API users will get the report with an array of orders, which have State=PENDING. This orderState means that the order reached back-end and is about to be processed. Its purpose is to acknowledge the order reception as in some cases actual order processing, such as in XBID, may take some time.
+While successfully validated orders are reported to all users belonging to the same company, only user who sent the order that is reported back with State=PENDING will get the message.
+While successfully validated orders are reported to all users belonging to the same company, only the user who sent an invalid order will get the corresponding error reply.
+/privateTrade
+User's so-called "own" trades, that is, the trades from the same company for the portfolios that user has access to.
+As a snapshot, up to last 2000 trades are sent based on the following rule: up to 1000 last trades from XBID side (leading "X" in tradeId field) and similarly, up to 1000 last trades in Nord Pool matcher for non-XBID areas and circumstances. Historical trades exceeding that limit must be requested via a separate REST interface.
+Conventions for private trades and order execution report:
+A user has access to one or more portfolios. The convention is that /privateTrades receives all trades made with same portfolios that user has access to.
+For example, we have user configuration as follows:
+a) user1 and user2 that share access to portfolio1.
+c) user3 that does not have access to the porfolio1.
+When user1 places an order using porfolio1, order execution report arrives for user1 and user2, but not for user3.
+When orders are matched and trade is reported in /privateTrades, only its legs (orders) that are connected to the portfolios accessible for the subscribed user will be included in the message.
+Subscription topic: /user/<username>/<version>/<streaming>/privateTrade
+Field descriptions:
+Trade Legs field descriptions:
+Nord Pool Data Mapping
+Orders Mapping
+Tran Status Mapping for Orders
+For Public Orders (localview):
+Look up deleted flag, if == true then it is C;
+else look if we already got the order, if yes then it will be A else V.
+For Private Orders (orderExecutionReport):
+Look up "action" field:
+If USER_ADDED then it is V
+If USER_HIBERNATED, SYSTEM_HIBERNATED, USER_DELETED, SYSTEM_DELETED then it is C
+If USER_MODIFIED, SYSTEM_MODIFIED then it is A
+If PARTIAL_EXECUTION then it is P
+If FULL_EXECUTION then it is E
+If ICEBERG_SLICE_ADDED then it is A
+If there is a Delete followed by USER_ADDED, then it’s an A
+
+Delivery Period Mapping for Orders
+The delivery period field is obtained using the fields deliveryStart and deliveryEnd (converting data always in CET/CEST). The timings are then mapped to hours, quarter hours and block of those, according to what available in the CubeWatchTS data structure as per below. If the delivery date is the same day as the transaction date, the DELIVERY_PERIOD will start with “C”, else it will start with “N”. Timings for the split are based on CET/CEST time zone and the productTypes will be mapped as following:
+P15 – CQ/NQ
+P30 – CQB/NQB
+P60 – CH/NH
+Custom block –CHB/NHB or CQB/NQB
+Remaining pre-defined blocks CHB/NHB
+The hourly instruments (P60, custom hourly blocks and per-defined blocks) will follow the syntax:
+- CH<hour> or NH<hour> for non-blocks instruments 
+- CHB<start_hour>-<end_hour> or NHB<start_hour>-<end_hour> if it is a block and start and end time are on the same day
+- CHB<start_hour>-NHB<end_hour> if it is a block and start and end time are not on the same day
+The quarter-hourly instruments (P15, P30 and custom quarterly blocks) will follow the syntax:
+- CQ<hour><quarter> or NQ<hour><quarter> for non-blocks instruments 
+- CQB<start_hour><start_quarter>-<end_hour><end_quarter> or NQB<start_hour><start_quarter>-<end_hour><end_quarter> if it is a block and start and end time are on the same day
+- CQB<start_hour><start_quarter>-NHB<end_hour><end_quarter> if it is a block and start and end time are not on the same day
+<hour> are all values included in 00-23 and <quarter> are all values included in q1-q4.
+Examples:
+deliveryStart = current day 15:00 CET, deliveryEnd = current day 16:00 CET -> CH15
+deliveryStart = current day 15:00 CET, deliveryEnd = current day 17:00 CET -> CHB15-16 
+deliveryStart = current day 22:00 CET, deliveryEnd = next day 00:00 CET -> CHB22-23
+deliveryStart = next day 15:00 CET, deliveryEnd = next day 15:15 CET -> NQ15q1
+deliveryStart = current day 15:30 CET, deliveryEnd = current day 16:00 CET -> CQB15q3-q4
+deliveryStart = current day 23:30 CET, deliveryEnd = next day 00:00 CET -> CQB23q3-q4
+Volume Mapping for Orders
+IF public:
+IF cached and deleted, THEN = cached volume, 
+ELSE = quantity/1000
+IF private: 
+IF PARTIAL_EXECUTION or FULL_EXECUTION and cached, THEN = cached quantity – quantity / 1000
+   ELSE = quantity/1000
+Trades Mapping
+Delivery Period Mapping for Trades
+The delivery period field is obtained using the fields deliveryStart and deliveryEnd (converting data always in CET/CEST). The timings are then mapped to hours, quarter hours and block of those, according to what available in the CubeWatchTS data structure as per below. If the delivery date is the same day as the transaction date, the DELIVERY_PERIOD will start with “C”, else it will start with “N”. Timings for the split are based on CET/CEST time zone and the productTypes will be mapped as following:
+P15 – CQ/NQ
+P30 – CQB/NQB
+P60 – CH/NH
+Custom block –CHB/NHB or CQB/NQB
+Remaining pre-defined blocks CHB/NHB
+The hourly instruments (P60, custom hourly blocks and per-defined blocks) will follow the syntax:
+- CH<hour> or NH<hour> for non-blocks instruments 
+- CHB<start_hour>-<end_hour> or NHB<start_hour>-<end_hour> if it is a block and start and end time are on the same day
+- CHB<start_hour>-NHB<end_hour> if it is a block and start and end time are not on the same day
+The quarter-hourly instruments (P15, P30 and custom quarterly blocks) will follow the syntax:
+- CQ<hour><quarter> or NQ<hour><quarter> for non-blocks instruments 
+- CQB<start_hour><start_quarter>-<end_hour><end_quarter> or NQB<start_hour><start_quarter>-<end_hour><end_quarter> if it is a block and start and end time are on the same day
+- CQB<start_hour><start_quarter>-NHB<end_hour><end_quarter> if it is a block and start and end time are on the not same day
+<hour> are all values included in 00-23 and <quarter> are all values included in q1-q4.
+Examples:
+deliveryStart = current day 15:00 CET, deliveryEnd = current day 16:00 CET -> CH15
+deliveryStart = current day 15:00 CET, deliveryEnd = current day 17:00 CET -> CHB15-16 
+deliveryStart = current day 22:00 CET, deliveryEnd = next day 00:00 CET -> CHB22-23
+deliveryStart = next day 15:00 CET, deliveryEnd = next day 15:15 CET -> NQ15q1
+deliveryStart = current day 15:30 CET, deliveryEnd = current day 16:00 CET -> CQB15q3-q4
+deliveryStart = current day 23:30 CET, deliveryEnd = next day 00:00 CET -> CQB23q3-q4
+
+Contracts Mapping
+Contracts are mapped to IF_NORDPOOL_CONTRACTS and IF_NORDPOOL_DELIVERY_AREAS tables. All the columns have similar names to the data from the API.
+IF_NORDPOOL_CONTRACTS
+IF_NORDPOOL_DELIVERY_AREA_STATES
+Delivery Areas
+Delivery areas are mapped into IF_NORDPOOL_DELIVERY_AREAS and IF_NORDPOOL_PRODUCT_TYPES tables.
+IF_NORDPOOL_DELIVERY_AREAS
+IF_NORDPOOL_PRODUCT_TYPES
+Edge cases description
+Own data duplicates in public transactions
+All public data is filtered - using the filter (order.Ownership == OrderOwnership.OTHER) - to determine whether the single public transaction comes from the own company. In case yes, this data is discarded, whether in the opposite case it is simply written in the database as usual.
+Handling overnight orders
+End of day process for previous day is triggered when we get an order for the new day. At the end of the day, we close all the existing overnight orders.
+The created cancelled order has TRAN_STATUS = C and Datetime: 23:59:59:999 CET/CEST (D-1)
+Handling of hibernation events
+In hibernation events, the following approach is used: the hibernation (USER_HIBERNATED and SYSTEM_HIBERNATED events) are translated into a cancellation event. When the order is reactivated, this is recorded as an update event, with TRAN_STATUS = A. The order ID and all the other related fields remain unchanged.
+Handling duplicated data in XBID orders
+We have a flag called “LoadXbidPublicOrders” in the configuration file. If set to false, it gets the public XBID order for only one delivery area (which ever delivery area data comes first). If set to true, it will get all the public XBID orders.
+Handling public trades
+If we have multiple legs and both have different delivery areas, we write both trades. 
+If we have multiple legs with different delivery areas, then we choose the alternate legs between buy and sell based on the previous public trade.
+If we have a single leg, we write that trade.
+Parquet Files
+High level overview
+Nord Pool interface uses parquet files to store the data to the file system. 
+API Messages
+The API messages are stored in the format below for each subscription.
+Contracts – yyyy-mm-dd-contracts.parquet
+Delivery areas – yyyy-mm-dd-delivery-areas.parquet
+Private orders – yyyy-mm-dd-private-orders-ContractId.parquet (we will have one file for each contract that is traded)
+Public orders – yyyy-mm-dd-public-orders-ContractId.parquet (we will have one file for each contract that is traded)
+Private trades – yyyy-mm-dd-private-trades-ContractId.parquet (we will have one file for each contract that is traded)
+Public trades – yyyy-mm-dd-public-trades-ContractId.parquet (we will have one file for each contract that is traded)
+Parsed Data
+Parser steps
+Parser gets the data for the previous day from the previous day's parquet files and populates the cache.
+Parses run days contracts one by one maintaining the above cache per contracts scope and does the mapping.
+Creates a persist file as mentioned below per contract and order or trade.
+The parsed data is stored in zipped folder in the format yyyy-mm-dd.zip, which contains the data in the format below.
+Orders – CLIENT_ORDERS_ContractId.parquet (One file for orders from each contract)
+Trades – CLIENT_TRADES_ContracId.parquet (One file for trades from each contract)
+Samples
+Contract ID Sample
+Below is the sample for contract Id from Nord Pool.
+
+--- TABLE 1 ---
+Document title | 
+Current Version | 
+Effective Date | 
+Status | 
+Document Owner
+Document Classification | 
+
+--- TABLE 2 ---
+Date of Revision | Version No. | Description of Change | Created / Updated by | Reviewed by | Approved by
+13.09.2023 | 1 | Initial Draft | Sairaj Kondu | Marcin D. | 
+19.01.2023 | 2 | Merge with old document, refinement, and hedge cases | Matteo R. | Sairaj Kondu | 
+09.07.2024 | 3 | Changed Nord pool processing to End of day | Sairaj Kondu | Marcin Dawidziuk | Marcin Dawidziuk
+
+--- TABLE 3 ---
+STOMP Command | Usage
+CONNECT | Starts a session
+DISCONNECT | Disconnects the session. not to be used by default
+SUBSCRIBE, UNSUBSCRIBE | Subscribes / unsubscribes from a topic
+SEND | Sends a message (order or command) to the trading platform
+
+--- TABLE 4 ---
+Field | Local contracts | XBID contracts
+MarketId | N_1 | N_2
+
+--- TABLE 5 ---
+Field | Local contracts | XBID contracts
+ContractId | NI_12345 | NX_12345
+OrderId | I12345 | X12345
+TradeId | I12345 | X12345
+
+--- TABLE 6 ---
+Field name | Description
+throttlingLimit | An array of throttling limits to be documented late.
+portfolios | An array of portfolios which are accessible for the logged in user.
+companyUsers | A map of relations of user UUID - user Name from the same company as logged user.
+
+--- TABLE 7 ---
+Field name | Type | Description
+id | String[10] | The portfolio's unique identifier
+name | String[30] | The portfolio's name in a human readable format.
+shortName | String[15] | The portfolio's short name
+companyId | String[6]. | The unique identifier of the company that the portfolio is assigned to.
+validFrom
+validTo | Timestamp | The portfolio is valid within this time range.
+deleted | Boolean | false: update information with the contents received
+true: delete entity indicated in the message
+state | Enumeration | Portfolio status:
+ACTI: Active
+IACT: Inactive
+* HIBE: Inactive
+currency | String | Currency used by the portfolio
+areas | Array | List of areas in which the portfolio is valid:
+
+areaId (int) — Area's unique identifier;
+validFrom, validTo (Timestamp) — Start and end of portfolio validity period for said area.
+markets | Array | List of markets where given portfolio can trade
+
+* marketId (String[10]) —Market unique identifier
+
+XBID Continuous (Id: N_2)
+Nord Pool Continuous (Id: N_1)
+permission | Enumeration | READ: users can view private orders and private trades
+WRITE: users can view private orders and private trades, and can place and modify orders and trades.
+ |  | 
+
+--- TABLE 8 ---
+Field name | Description | 
+updatedAt * | Timestamp | Last modification time (status change) for this contract *
+
+* This field is obsolete, as its value is not being maintained at server side. In the test environment this change can already be tested. It is going to be deployed to the production system on Wednesday September 29, 2021, as part of the morning service break.
+deliveryAreaId | Int | Delivery Area ID
+eicCode | String | Delivery area EIC (Energy Identification Code)
+currencyCode | String | Currency code used in the area
+areaCode | String | Delivery area code
+timeZone | Tz database format | Time zone used in the area
+countryIsoCode | String | Country ISO code
+productTypes | array of Strings | Product types available in the area
+deleted | Boolean | false: update information with the contents received
+true: delete the entity indicated in the message
+
+--- TABLE 9 ---
+Field name | Type | Description
+contractId | String | Unique identifier of the contract
+NPM *: starts with NI_
+XBID: starts with NX_ 
+
+* NPM: "Nord Pool Matching system"
+updatedAt | Timestamp | Last modification time (status change) for this contract
+contractName | String | A more user friendly name for the contract (PH, QH,HH... etc.).
+Example: PH-20210115-18
+durationSeconds | Int | The total duration of this contract in seconds - e.g. hourly contracts have a duration of 3600 seconds.
+resolutionSeconds | Int | The minimum resolution of this contract in this delivery area in seconds - e.g. 15 minute resolution will be 900 seconds.
+predefined | Boolean | When a custom block order is entered, a new contract is created for that time interval if it does not already exist, in which case predefined would be false.
+deleted | Boolean | false: update information with the contents received
+true: delete entity indicated in the message.
+dlvryStart, dlvryEnd | Timestamp | The delivery start and end dates for this contract
+dlvryAreaState | Array | A contract can be available in many delivery areas, and for each delivery area it can have different opening and closing times. So, for each area state, openAt and closeAt times are defined.
+
+dlvryAreaId (Int) — Area ID
+state (Enumeration) — State of the contract inside the area:
+ACTI: Active
+IACT: Newly generated (will be opened for trading) or Expired contract (will never be reopened)
+HIBE: Closed (can be reopened)
+FRZN: Frozen
+
+openAt, closedAt (Timestamp) — validity times for contract in the area
+marketId | String | Id of the market that this contract belongs to, for example a code for XBID market.
+N_1 - Contract from the Nord Pool Matching engine.
+N_2 - Contract from the XBID system
+shortDisplayName | String | Short display name for contract.
+Example: PH-20210115-18
+mediumDisplayName | String | Medium length display name for contract.
+Example: PH-20210115-18
+productType | String | Type of the product that this contract belongs to. Possible values:
+P15MIN - Quarter Hour
+P30MIN - Half Hour
+P60MIN - One hour
+BLOCK_2H - 2 Hour Block (UK market)
+BLOCK_4H - 4 Hour Block (UK market)
+DON - Day Overnight (UK market)
+DB34 - Block 3+4 (UK market)
+DP - Day Peak (UK market)
+DEP - Day Extended Peak (UK market)
+DB - Day Base (UK market)
+* CUSTOM_BLOCK - User-defined block
+productId | String | Id of the product that this contract belongs to.
+
+For local market:
+NX_Intraday_Power_D - Power Hour
+NX_Intraday_Power_D_HH - Half-hour
+NX_Intraday_Power_D_QH - Quarterly hour
+NX_Intraday_Custom_Block_Hour_D - Custom block based on hourly products
+
+For SIDC market:
+
+XBID_Hour_Power - Power Hour
+XBID_Half_Hour_Power - Half-hour
+XBID_Quarter_Hour_Power - Quarterly hour
+XBID_Hour_Power - Custom block, based on hourly products (note: productType = "CUSTOM_BLOCK")
+
+UK-specific predefined blocks:
+NX_Intraday_Power_D_UKDB
+NX_Intraday_Power_D_UKDB34
+NX_Intraday_Power_D_UK2H
+NX_Intraday_Power_D_UK4H
+NX_Intraday_Power_D_HRDB
+NX_Intraday_Power_D_UKDEP
+NX_Intraday_Power_D_UKDP
+NX_Intraday_Power_D_UKDON
+
+--- TABLE 10 ---
+Field name | Type | Description
+buyOrders | Array | Basic data for BUY orders, see table below
+sellOrders | Array | Basic data for SELL orders, see table below
+contractId | String | ID of the contract that this order belongs to
+deliveryAreaId | Int | ID of the delivery area that this local view represents
+updatedAt | Timestamp | The timestamp at which this order was updated, either due to an action by the user (e.g. modification) or by the system (e.g. validity expired, contract expired)
+revisionNo - from version 4.16.1 | Int | Version of the local view revision provided by XBID. For local products it is always 0.
+
+--- TABLE 11 ---
+Field name | Type | Description
+orderId | String | The first character is the market in which the order exists:
+I for Nord Pool Intraday
+X for XBID 
+The remaining part is a rolling unique number for the order (unique per market)
+deliveryAreaId | Int | Id of the delivery area that this particular order belongs to.
+In XBID, deliveryAreaId will not show the origin of the order, but the id of the local area that is being queried.
+price | Long | Unit price
+qty | Long | The visible quantity on the current delivery area (see deliveryAreaId in previous table)
+createdAt | Timestamp | The timestamp at which this order was received by the system
+updatedAt | Timestamp | The timestamp at which this order was updated, either due to an action by the user (e.g. modification) or by the system (e.g. validity expired, contract expired)
+deleted | Boolean | If false: update information with the contents received
+If true: delete entity indicated in the message
+ownership | Enumiration | OWN, COMPANY, OTHER
+portfolioId | String | If the order in the local view belongs to your company, it will be enriched with portfolio information, otherwise it will be set to null
+
+--- TABLE 12 ---
+Field name | Type | Description
+tradeId | String | Trade ID (unique trade identifier). The prefix might be:
+I in case of the Nord Pool Matcher
+X in case of XBID
+updatedAt | Timestamp | The timestamp at which this trade was updated
+tradeTime | Timestamp | The timestamp when the trade was created.
+state | Enumeration | COMPLETED - the trade is completed.
+CANCELLED - the trade is cancelled.
+DISPUTED - the trade is pending decision for cancellation.
+NOT_CANCELLED - the trade cancellation request was rejected.
+legs | Array | Array of orders. See table below.
+currency | String | Currency code
+eventSequenceNo | Long | Sequence number for tracking received ticker events.
+deleted | Boolean | A flag that indicates if this trade should no longer be visible on the market (old trade).
+mediumDisplayName | String | A medium length display name for the contract.
+companyTrade | Boolean | Is it a self trade?
+- true: based on the "ownership" field of the trades:
+
+- in case of OTHER: this is self-trade for a different company.
+- in case one of the trades has COMPANY_BUY / OWN_BUY, another has COMPANY_SELL / OWN_SELL: both trade legs belong to "my" company, so this is a self-trade.
+
+- false: not a self trade
+
+--- TABLE 13 ---
+Field name | Type | Description
+contractId | String | Contract Id for the order.
+side | Enumeration | Is it a buy or sell leg:
+BUY
+SELL
+unitPrice | Long | Price
+quantity | Long | Quantity
+deliveryAreaId | Int | Delivery Area Id of the order
+ownership | Enum | OWN_BUY , OWN_SELL - the leg (order) is placed by current user and is on BUY or SELL side, respectively
+COMPANY_BUY , COMPANY_SELL - the order was placed by different user from same company. Order is on BUY or SELL side, respectively
+* OTHER - the order was placed by different company than the user's.
+aggressor | Boolean | Please note that for XBID trades, aggressor field is always false
+For trades done on local contracts with trade id prefix I, then the following applies:
+true if leg is the aggressor
+false if leg is not the aggressor
+
+--- TABLE 14 ---
+Field name | Type | Description
+updatedAt | Timestamp | Publishing time (status change) for this message
+requestId | UUID | Unique identifier for this request, provided by the client to track their own requests
+errorType, errors | array | Data about errors. See below
+orders |  | See in the next table.
+
+--- TABLE 15 ---
+Field name | Type | Description
+eventSequenceNo | Long | Sequence number for tracking received order execution reports.
+marketId | String | Id of the market that this contract belongs to, for example a code for XBID market.
+N_1 - Contract from the Nord Pool Matching engine.
+N_2 - Contract from the XBID system
+tenantId | String | Always "N" for Nord Pool
+userId | String | Id of a user responsible for a change
+revisionNo | Long | The latest revision number of the trade
+orderId | String | The first character is the market in which the order exists:
+I for Nord Pool Intraday
+X for XBID 
+The remaining part is a rolling unique number for the order (unique per market)
+previousOrderId | String | Id of the previous order in this modification chain. When an order is modified and its priority changes, or partially matched, a new order Id is assigned.
+originalOrderId | String | The original order id in this modification chain.
+createdAt | Timestamp | The timestamp at which this execution report was received by the system
+updatedAt | Timestamp | Last update time for this order
+clientOrderId | Java.util.UUID | UUID for the order,provided by the client to track their own orders. Should be unique for every new order.
+portfolioId | String | The portfolio id of the current order
+contractIds | Array of String | Unique identifier of the contract
+NPM *: starts with NI_
+XBID: starts with NX_ 
+
+* NPM: "Nord Pool Matching system"
+linkedBasketId | Java.Util.UUID | A unique identifier that is common for all orders in the same basket, to be used for order / basket tracking and identification. See more information here.
+deliveryAreaId | Long | The delivery area id of the current order.
+side | String (enum) | BUY
+SELL
+orderType | String (enum) | LIMIT
+ICEBERG
+* USER_DEFINED_BLOCK
+unitPrice | Long | Price in Euro cents or pence (based on currency for the area)
+quantity | Long | Quantity in kW
+timeInForce | String (enum) | FOK - Fill or Kill. The order is immediately fully executed or deleted.
+IOC - Immediate or cancel. The order is executed immediately to its maximum extent. In a case of a partial execution, the remaining volume is removed from the order book.
+GFS - Good for the trading session. The order rests in the order book until it is either executed, removed by the user or the current trading session (trading phase) of the underlying contract ends.
+GTD - Good Till Date. The order rests in the order book until the date specified in the expireTime field.
+expireTime | String (ISO 8601 timestamp)
+e.g: 2020-05-16T11:35:00Z | If timeInForce is set to GTD (Good Till Date), the expireTime will determine when the order expires.
+
+Accepted value is multiple of 5 minutes, i.e.
+
+not 2018-06-21T07:32:52.673Z but either 2018-06-21T07:30:00.000Z or 2018-06-21T07:35:00.000Z
+text | String | Text entered by a member. Maximum 250 characters.
+state | String (enum) | ACTI - Active
+IACT - Closed, matched (will never be reopened). Returned back with an execution report.
+HIBE - Deactivated (can be reopened)
+PENDING - acknowledgment that order received by exchange. Returned back with execution report.
+action | Enumeration | USER_ADDED - Order added by a user
+USER_HIBERNATED - Order deactivated by a user
+USER_MODIFIED - Order modified by a user
+USER_DELETED - Order deleted by a user
+SYSTEM_HIBERNATED -Order deactivated by the system
+SYSTEM_MODIFIED -Order modified by the system
+SYSTEM_DELETED - Order deleted by the system
+PARTIAL_EXECUTION -Order is partially executed
+FULL_EXECUTION - Order is fully executed
+ICEBERG_SLICE_ADDED - A new slice of an Iceberg order was added to the service
+clipSize | Long | For iceberg orders only; the size of one clip
+clipSize limitation is the same as the quantity, it can not be greater then.
+clipPriceChange | Long | For iceberg orders only; the price change after each clip is consumed
+remainingQuantity | Long | Remaining quantity (not null only for iceberg orders)
+errors |  | Data about errors. See below
+executionRestriction | String (enum) | AON - All or None. The order must be filled completely or not at all. The order stays in the order book until it is executed or removed by the system or user. This execution restriction can be used only in combination with User Defined Block Orders.
+NON - No restrictions.
+
+--- TABLE 16 ---
+Field name | Type | Description
+tradeId | String | Trade ID
+updatedAt | Timestamp | Last update time for this trade
+tradeTime | Timestamp | Time of creation of this trade
+state | Enumeration (String) | COMPLETED - trade created
+DISPUTED - trade in disputed status
+* CANCELLED - trade cancelled
+legs | array of objects | Basic data about orders participated in the trade. See "Trade Legs field descriptions" table below
+currency | String | Currency code
+eventSequenceNo | Int | Incremental counter of messages (technical field)
+deleted | Boolean | false: update information with the contents received
+true: delete entity indicated in the message
+mediumDisplayName | String | Medium length name for contract
+cancellationFee | Int | Cancellation fee for this trade
+cancellationDeadLine | String | There is a deadline for trade cancellation, in accordance with market rules
+revisionNo | Long | The latest revision number of the trade
+companyTrade | Boolean | Flagging of self-trade functionality. True if both trade legs belong to the company this user also belongs to.
+
+Possible values are True or False
+
+--- TABLE 17 ---
+Field Name | Type | Description
+contractId | String | ID of the contract
+side | Enumeration | BUY
+SELL
+unitPrice | Long | Price
+quantity | Long | Quantity traded
+deliveryAreaId | Int | Delivery Area of the trade
+aggressor | Boolean | Please note that for XBID trades, aggressor field is always false
+For trades done on local contracts with trade id prefix I, then the following applies:
+true if leg is the aggressor
+false if leg is not the aggressor
+portfolioId | String | Portfolio ID involved in a trade
+refOrderId | String | Id of the order involved in the trade / leg
+userId | String | User name
+deliveryStart | Long | Start time of the delivery
+deliveryEnd | Long | End time of the delivery
+orderType | Enumeration | LIMIT
+ICEBERG
+* USER_DEFINED_BLOCK
+clientOrderId | String | Unique Id provided by the client for order tracking
+orderState DEPRECATED | Enumeration | Deprecated field. Always null. Will be removed in future versions of API. Currently exists to keep schema unchanged.
+text | String | Text entered by a member. Maximum 250 characters.
+orderAction DEPRECATED | Enumeration | Deprecated field. Always null. Will be removed in future versions of API. Currently exists to keep schema unchanged.
+timeInForce DEPRECATED | Enumeration | Deprecated field. Always null. Will be removed in future versions of API. Currently exists to keep schema unchanged.
+
+--- TABLE 18 ---
+TextColumn | Data Type | Max Length | Codes | Mapping
+TRAN_STATUS | Nvarchar | 32 | V, C, A, P, E | Look at section 6.1.1
+COUNTRY | nvarchar | 64 | DE, UK, DK, NL… | Get CountryISOCode based on corresponding /deliveryAreas
+COMMODITY | nvarchar | 64 | EL | Hardcoded
+MARKET_AREA | nvarchar | 64 | UK, DK1, DK2… | Get areaCode based on corresponding /deliveryAreas
+DELIVERY_PERIOD | nvarchar | 400 | See Mapping | Look at section 6.1.2
+TRAN_INS_TYPE | nvarchar | 64 | ST | Hardcoded
+INS_CLASS | nvarchar | 64 | See Mapping | IF productType DP/DEP THEN “P”
+IF DB THEN “B”
+Everything ELSE “Bl”
+INS_TYPE | nvarchar | 800 | See Mapping | Build based on configuration string which looks like below:
+"InsTypeFormat": "MARKET_PLACE-COMMODITY-COUNTRY-MARKET_AREA-ORIG_INS_TYPE-DELIVERY_PERIOD"
+ORIG_INS_TYPE | nvarchar | 800 | ex. NX_Quarterly_Hour_Power | Get productId from underlying contract
+TRADER | nvarchar | 800 | See Mapping | IF private order get trader name from traders.csv file for each customer.
+IF public order set to NULL
+MARKET_PLACE | nvarchar | 800 | NORDPOOL | Hardcoded
+ORIGIN | nvarchar | 800 | NORDPOOL | Hardcoded/configurable
+ORIG_TRAN_ID | nvarchar | 800 | See Mapping | IF private = “COUNTRY_MARKET_AREA_originalOrderId”
+IF public = “COUNTRY_MARKET_AREA_orderId”
+ORIG_CD_ID | nvarchar | 800 | N/A | 
+BOOK | nvarchar | 800 | See Mapping | NULL for public orders
+Text field for private orders
+SORT_ID | numeric | 9 | See Mapping | If already present, then =+1 
+ELSE = 1
+BID_ASK | nvarchar | 32 | B, A | IF private = side
+IF public: IF order is in buy tag THEN B, ELSE A.
+TRAN_DATETIME | datetime2 | 8 | ex.
+2020-10-05T10:09:55.444Z | Taken from updatedAt field (UTC)
+LOT_SIZE | numeric | 9 | NULL | N/A
+UNIT | nvarchar | 64 | MW | Hardcoded
+CURRENCY | nvarchar | 64 | EUR, GBP | Use currencyCode from underlying delivery area
+PARTY | nvarchar | 800 | See Mapping | NULL for public orders
+Configured value for private orders
+SUBPARTY | nvarchar | 800 | See Mapping | portfolioId field for private orders
+NULL for public orders
+COUNTERPARTY | nvarchar | 800 | NULL | N/A
+BROKER | nvarchar | 800 | NULL | N/A
+CLIENT_ID | nvarchar | 800 | NULL | N/A
+EXCLUDED_FROM | nvarchar | 32 | NULL | N/A
+TIMEZONE | nvarchar | 64 | UTC | Hardcoded
+SIDE | numeric | 9 | 0 | Hardcoded
+SOURCE | nvarchar | 800 | See Mapping | ID of the message in the queue
+LINKED_TRAN_ID | numeric | 9 | See Mapping | Take orderId and replace “I” with 1 and “X” with 3
+PRICE | float | 8 | See Mapping | Public order – Price / 100
+Private order – Unit price / 100
+SPREAD | float | 8 | NULL | N/A
+PREMIUM | float | 8 | 0 | Hardcoded
+VOLUME | float | 8 | See Mapping | Look at section 6.1.3
+HEDGING_FLAG | numeric | 9 | 0 | Hardcoded
+PUT_CALL | nvarchar | 8 | NULL | N/A
+ORDER_TYPE | nvarchar | 32 | LIM, ICE | If private and ICEBERG THEN = ICE, else = LIM
+HIDDEN_VOL | numeric | 18 | See Mapping | Public orders = null
+Private orders: 
+IF Iceberg = remaining quantity / 1000
+ELSE = null
+TEMP_ID | numeric | 18 | See Mapping | Automatically assigned using a sequential number generation
+DELIVERY_CATEGORY |  |  | S | 
+
+--- TABLE 19 ---
+Column | Data Type | Max Length | Codes | Mapping
+TRAN_STATUS | nvarchar | 32 | V, C | IF state = Cancelled THEN = C 
+ELSE = V
+ORDER_REF | nvarchar | 800 | See Mapping | Equals to “countryCode _areaCode_refOrderId”
+COUNTRY | nvarchar | 64 | DE, UK, DK, NL… | Get CountryISOCode based on corresponding /deliveryAreas
+COMMODITY | nvarchar | 64 | EL | Hardcoded
+MARKET_AREA | nvarchar | 64 | UK, DK1, DK2… | Get areaCode based on corresponding /deliveryAreas
+DELIVERY_PERIOD | nvarchar | 400 | See Mapping | Look at section 6.2.1
+TRAN_INS_TYPE | nvarchar | 64 | ST | Hardcoded
+INS_CLASS | nvarchar | 64 | See Mapping | IF productType DP/DEP THEN “P”
+IF DB THEN “B”
+Everything ELSE “Bl”
+INS_TYPE | nvarchar | 800 | See Mapping | Build based on configuration string which looks like below:
+"InsTypeFormat": "MARKET_PLACE-COMMODITY-COUNTRY-MARKET_AREA-ORIG_INS_TYPE-DELIVERY_PERIOD"
+ORIG_INS_TYPE | nvarchar | 800 | ex. NX_Quarterly_Hour_Power | Get productId from underlying contract
+TRADER | nvarchar | 800 | See Mapping | IF private order get trader name from traders.csv file for each customer.
+IF public order leave empty
+MARKET_PLACE | nvarchar | 800 | NORDPOOL | Hardcoded
+ORIGIN | nvarchar | 800 | NORDPOOL | Hardcoded/configurable
+ORIG_TRAN_ID | nvarchar | 800 | See Mapping | Equals to: “COUNTRY_MARKET_AREA_tradeId”
+ORIG_CD_ID | nvarchar | 800 | NULL | N/A
+BOOK | nvarchar | 800 | See Mapping | NULL for public orders
+Text field for private orders
+SORT_ID | numeric | 9 | See Mapping | If already present, then =+1 
+ELSE = 1
+BUY_SELL | nvarchar | 32 | See Mapping | Based on side field. If it is Buy, then set as B, else set as S
+TRAN_DATETIME | datetime2 | 8 | See Mapping | IF a cancelled trade = UpdatedAtUtc, ELSE = TradeTime
+LOT_SIZE | numeric | 9 | NULL | N/A
+UNIT | nvarchar | 64 | MW | Hardcoded
+CURRENCY | nvarchar | 64 | EUR, GBP | Use currencyCode from underlying delivery area
+PARTY | nvarchar | 800 | See Mapping | NULL for public orders
+Configured value for private orders
+SUBPARTY | nvarchar | 800 | See Mapping | portfolioId field for private trades
+NULL for public trades
+COUNTERPARTY | nvarchar | 800 | NULL | N/A
+BROKER | nvarchar | 800 | NULL | N/A
+CLIENT_ID | nvarchar | 800 | NULL | N/A
+EXCLUDED_FROM | nvarchar | 32 | NULL | N/A
+TIMEZONE | nvarchar | 64 | UTC | Hardcoded
+SIDE | numeric | 9 | 0 | Hardcoded
+DELIVERY_HOURS | float | 8 | See Mapping | Equals to deliveryEnd – deliveryStart of the underlying contract (in hours)
+SLEEVE | numeric | 9 | NULL | N/A
+SOURCE | nvarchar | 800 | See Mapping | ID of the message in the queue
+PRICE | float | 8 | See Mapping | Public order = Price/100
+Private order = Unit price/100
+SPREAD | float | 8 | NULL | N/A
+PREMIUM | float | 8 | 0 | Hardcoded
+VOLUME | float | 8 | See Mapping | Equals to quantity/1000
+HEDGING_FLAG | numeric | 9 | 0 | Hardcoded
+FIXED_ROLLOVER | numeric | 9 | 0 | Hardcoded
+PUT_CALL | nvarchar | 8 | NULL | N/A
+TEMP_ID | numeric | 18 | See Mapping | Automatically assigned using a sequential number generation
+
+--- TABLE 20 ---
+Column | Data Type | Max Length
+CONTRACTID | NVARCHAR | 400
+UPDATEDATUTC | DATETIME2 | 
+CONTRACTNAME | NVARCHAR | 4000
+DURATIONSECONDS | BIGINT | 
+RESOLUTIONSECONDS | BIGINT | 
+PREDEFINED | BIT | 
+ISDELETED | BIT | 
+DELIVERYSTART | DATETIME2 | 
+DELIVERYEND | DATETIME2 | 
+MARKETID | NVARCHAR | 800
+SHORTDISPLAYNAME | NVARCHAR | 800
+MEDIUMDISPLAYNAME | NVARCHAR | 800
+PRODUCTTYPE | INT | 
+PRODUCTID | NVARCHAR | 800
+
+--- TABLE 21 ---
+Column | Data Type | Max Length
+DELIVERYAREAID | BIGINT | 
+CONTRACTID | NVARCHAR | 400
+STATE | INT | 
+OPENATUTC | DATETIME2 | 
+CLOSEDATUTC | DATETIME2 | 
+
+--- TABLE 22 ---
+Column | Data Type | Max Length
+DELIVERYAREAID | BIGINT | 
+EICCODE | NVARCHAR | 400
+CURRENCYCODE | NVARCHAR | 100
+AREACODE | NVARCHAR | 400
+TIMEZONE | NVARCHAR | 100
+COUNTRYISOCODE | NVARCHAR | 400
+ISDELETED | BIT | 
+
+--- TABLE 23 ---
+Column | Data Type | Max Length
+ID | INT | 
+TYPE | NVARCHAR | 400
+DELIVERYAREAID | BIGINT | 
+
+--- TABLE 24 ---
+ContractId | UpdatedAtUtc | ContractName | DurationSeconds | ResolutionSeconds | PreDefined | IsDeleted | DeliveryStart | DeliveryEnd | MarketId | ShortDisplayName | MediumDisplayName | ProductType | ProductId
+NX_354433 | 2023-10-05 13:00:01.2850000 | HH-20231006-16 | 1800 | 1800 | 1 | 0 | 2023-10-06 05:30:00.0000000 | 2023-10-06 06:00:00.0000000 | N_2 | HH-20231006-16 | HH-20231006-16 | 1 | XBID_Half_Hour_Power

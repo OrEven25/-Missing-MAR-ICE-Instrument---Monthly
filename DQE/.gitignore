@@ -1,0 +1,35 @@
+# ── Data files (never commit — can be GBs) ───────────────────────────────────
+*.parquet
+*.zip
+*.csv
+*.bak
+
+# ── DuckDB cache files ────────────────────────────────────────────────────────
+*.duckdb
+*.duckdb.wal
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# ── Streamlit ─────────────────────────────────────────────────────────────────
+.streamlit/secrets.toml
+
+# ── OS / Editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+*.swp
+
+# ── Extracted data directories (contain parquet files) ───────────────────────
+Nordpool/extracted/
+EPEX/extracted/

@@ -1,0 +1,129 @@
+Document Information
+Revision History
+Copyright © 2021, All rights reserved.
+This material includes the confidential and/or proprietary information of CubeLogic, is for the sole use of the intended recipient, and may be subject to the terms and conditions of a license agreement.  Without the express written consent of CubeLogic and except as specifically authorized pursuant to a license agreement, no part of this material may be reproduced or transmitted in any form or by any means, electronic or mechanical, including photocopying, recording, or facsimile, for any purpose other than for the recipient’s internal use.
+Disclaimer
+CubeLogic does not warrant, guarantee, or make representations concerning the contents of this material. All information is provided "AS-IS," without express or implied warranties of any kind including, without limitation, the warranties of merchantability, fitness for a particular purpose, quality and title. CubeLogic reserves the right to change the contents of this material and the features or functionalities of its products and services at any time without obligation to notify anyone of such changes
+Contents
+Overview
+This document outlines the changes made during the refactoring of the Nordpool interface. The primary goal of this refactoring was to improve performance, enhance maintainability, and fix existing bugs.
+Summary of Changes
+The refactoring involved significant changes to the codebase, fixed issues with Sort ID and OBK inversions, added a flag for Spot, introduced DE market area split functionality, and Market_Area harmonization aligned with EPEX.
+Detailed Changes
+Technical: 
+Design changes that will bring the Nord Pool feed up to speed with latest upgrades done on EPEX and TGE interfaces Also merging parser and persist services into a single service.
+Sort ID Issue:
+Current State: The current sort ID, system generates duplicate IDs for transactions with the same transaction time.
+Private Trades: SortID is always 1 and if a contract has two legs then SortID 1 and 2
+Public/ private orders: incremental based on lifecycle
+To be Implemented: Update the sort ID generation logic to ensure uniqueness. 
+Trades: Incremental based on INS_TYPE, TRAN_DATETIME and ORIG_TRAN_ID for all data (private + market)
+Orders:
+Private data – No Changes required
+Public data - Incremental based on INS_TYPE, TRAN_DATETIME and ORIG_TRAN_ID
+Open Orders Handling after Disconnection (Public Orders)
+Current State:
+Open orders (Public) that are not part of the snapshot after disconnection and reconnection are being saved to the table and leaving them in an open state.
+For example, if an order is placed and then there is a disconnection, the order can be cancelled during the disconnection. Upon reconnection, when we request the snapshot, the cancelled order will not be part of the snapshot.
+To Be Implemented: 
+If order doesn’t exist in the snapshot, then generate a synthetic cancel order with TRAN_DATETIME= Snapshot Request Time
+Reason for the Change:
+Including open orders that were not in the snapshot was causing many order book inversions. During disconnection, an order that had already been received might get cancelled, and the cancelled transaction would not be part of the snapshot. Previously, we would load that order and leave it open. However, any open public order that is not present in the snapshot must be synthetically canceled.
+Germany Market Area Split
+Germany (DE) is treated as a single delivery area up until 30 minutes before delivery. 30 minutes before delivery, the market is split into the 4 delivery area (50Hertz, TTG, TNG, AMP). Orders and trades must be ingested into the system accordingly.
+Current Behaviour: We are always ingesting all 4 delivery areas (Public). This is resulting in duplicates and causing false OBK inversions
+Expected Behaviour: 
+Before Market Area Split (T ≥ 30 minutes before delivery):
+For the German market area, ingest only the data (Public) with 50Htz delivery area and save MarketArea as NULL for public and private transactions.
+At Market Area Split (T < 30 minutes before delivery):
+For all active orders that were created before split: Synthetic Cancel the pre-split order at T-30 and reopen the order immediately at T-30, but with the correct MarketArea assigned (50Htz, AMP, TTG, TNG)
+Any new orders/trades after split are ingested with their respective Market Area directly.
+Ingest public orders/trades that belong to client-relevant Market Areas only
+Outstanding Volume for Partial Fill
+Current State: Until V10 Volume column is filled with executed value for partial fills
+To be Implemented: From V11, Volume column should be filled with outstanding volume for partial fills, applies to ICEberg transaction as well. No changes required to the cancellation and Executed transactions.
+Use case 1 - Regular Partial fill with multiple partial fills: The VOLUME field will always display the Outstanding volume of the order.
+Logic: 
+Use Case 2: ICEberg
+An iceberg order is a large order that is broken into smaller parts (called slices) to hide the full size from the market. Only one slice is visible at a time, while the rest remains hidden. This helps avoid moving the market price too much.
+When a slice is fully executed and the next slice is revealed, the transaction should display the next slice's volume as the remaining volume. Same mapping will be applied to ICEBerg case as well.
+Current: 
+Expected: 
+ICEBerg- Changes to Hidden_Vol Column
+Current Behaviour:  The RemainingVolume field from the Nordpool is being directly stored as HIDDEN_VOL. However, this is incorrect for ICEBERG orders, where:
+Quantity = the visible clip (currently active in the market)
+RemainingVolume = the total volume left to be executed, including the visible clip
+To Be Implemented:
+Nordpool raw data:
+Expected:
+For cancelled transactions hidden volume should be same as previous transaction
+Market Area Harmonization
+This is to match market areas of nordpool with EPEX. Example:  For EPEX, country is PL then since it is single prize zone, market area in null, but for nordpool we gettting data as market area PL and country as PL. just like this there is another case EPEX has country as GR BUT MARKET IS NULL, for nordpool country is GR and market area has GREE. But we dont want to show GREE, we should save null in the table just like epex has.
+The goal is to standardize single-price zone countries by removing unnecessary market area values.
+This ensures data aligns with how EPEX represents such zones
+To be Implemented: 
+The following rules must be applied while saving into the client_orders, client_trades tables:
+If country and market area are the same (e.g., PL / PL), then set market area to null.
+If a country has only one record (e.g., only one entry for GR with GREE) then Set market area to null.
+Source Column Enhancement
+To align with the format used for EPEX, the SOURCE column for Nord Pool orders will be enhanced to include the following tag values in the output string:
+Mandatory Tags:
+contractId
+state
+action
+orderid
+revisionNo
+unitPrice
+volume
+Optional Tags (if available):
+timeInForce
+executionRestriction
+actionIssuer
+These values will be concatenated into a single string and stored in the SOURCE column during order processing.
+Other Issues: 
+Duplicates in public orders:
+SELECT * FROM CLIENT_ORDERS WHERE INS_TYPE='NORDPOOL_BIO_NORDPOOL_EL_DK_DK2_XBID_Quarter_Hour_Power_CQ03q2' ORDER BY ORIG_TRAN_ID, TRAN_DATETIME
+
+--- TABLE 1 ---
+Document Title | 
+Current Version | 
+Effective Date | 
+Status | 
+Document Owner | 
+Document Classification | 
+
+--- TABLE 2 ---
+Date of Revision | Version No. | Description of Change | Created / Updated by | Reviewed by | Approved by
+ |  |  |  |  | 
+ |  |  |  |  | 
+ |  |  |  |  | 
+ |  |  |  |  | 
+
+--- TABLE 3 ---
+Internal Field | Exchange Field | Transformation Rule
+Volume | Quantity | When Action= PARTIAL_EXECUTION and quantity = 0 then ignore the transaction
+Else direct mapping
+Note: Dividing the quantity with 1000 logic stays same
+
+--- TABLE 4 ---
+ORDER_TYPE | TRAN_STATUS | SORT_ID | TRAN_DATETIME | ORIG_TRAN_ID | VOLUME | HIDDEN_VOL | PRICE | Executed
+ICE | V | 1 | 5:14:19 AM | DK_DK1_X14735549544 | 5 | 8 | 75.05 | 0.00
+ICE | P | 2 | 5:14:19 AM | DK_DK1_X14735549544 | 4.40 | 8 | 75.05 | 0.60
+ICE | P | 3 | 5:14:19 AM | DK_DK1_X14735549544 | 5 | 3 | 75.05 | 4.40
+ICE | P | 4 | 5:14:19 AM | DK_DK1_X14735549544 | 3 | 0 | 75.05 | 5
+ICE | E | 5 | 5:14:19 AM | DK_DK1_X14735549544 | 3 | 0 | 75.05 | 3
+
+--- TABLE 5 ---
+Internal Field | Exchange Field | Transformation Rule
+HIDDEN_VOL | ACTION, Remaining Volume | When action= USER_ADDED or USER_MODIFIED or ICEBERG_SLICE_ADDED, PARTIAL_EXECUTION,
+FULL_EXECUTION, 
+SYSTEM_DELETED, USER_DELETED Then HIDDEN_VOL = RemainingQuantity – Quantity
+
+--- TABLE 6 ---
+EPEX | EPEX | NORDPOOL | NORDPOOL | 
+Country | Market Area | Country | Market Area | Expected Market Area
+AT | NULL | AT | AT | NULL
+GR | NULL | GR | GREE | NULL
+PL | NULL | PL | PL | NULL
+ |  | PL | PLA | PLA
+PL | PLC | PL | PLC | PLC
