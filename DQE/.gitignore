@@ -4,6 +4,9 @@
 *.csv
 *.bak
 
+# ── Small reference CSVs (explicitly allowed) ─────────────────────────────────
+!last_update_data.csv
+
 # ── DuckDB cache files ────────────────────────────────────────────────────────
 *.duckdb
 *.duckdb.wal
