@@ -4,7 +4,7 @@ from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CSV_FILE = Path(__file__).parent / "handshake_data.csv"
-# Export your SQL pivot result to this CSV (ITEM column + one column per date)
+ITEMS = ["NORDPOOL", "EOD2_START", "EOD2_END", "EOD1_START", "EOD1_END"]
 # ─────────────────────────────────────────────────────────────────────────────
 
 df = pd.read_csv(CSV_FILE)
@@ -12,6 +12,9 @@ df = pd.read_csv(CSV_FILE)
 # Melt from wide (pivot) to long format
 date_cols = [c for c in df.columns if c != "ITEM"]
 df_long = df.melt(id_vars="ITEM", value_vars=date_cols, var_name="DATE", value_name="LAST_UPDATE")
+
+# Filter to selected items only
+df_long = df_long[df_long["ITEM"].isin(ITEMS)]
 
 # Parse dates and datetimes
 df_long["DATE"] = pd.to_datetime(df_long["DATE"], dayfirst=True)
