@@ -14,9 +14,9 @@ date_cols = [c for c in df.columns if c != "ITEM"]
 df_long = df.melt(id_vars="ITEM", value_vars=date_cols, var_name="DATE", value_name="LAST_UPDATE")
 
 # Parse dates and datetimes
-df_long["DATE"] = pd.to_datetime(df_long["DATE"])
+df_long["DATE"] = pd.to_datetime(df_long["DATE"], dayfirst=True)
 df_long = df_long.dropna(subset=["LAST_UPDATE"])
-df_long["LAST_UPDATE_DT"] = pd.to_datetime(df_long["LAST_UPDATE"])
+df_long["LAST_UPDATE_DT"] = pd.to_datetime(df_long["LAST_UPDATE"], format="mixed", dayfirst=False, errors="coerce")
 
 # Extract time as decimal hours for y-axis (e.g. 07:30 → 7.5)
 df_long["HOUR"] = df_long["LAST_UPDATE_DT"].dt.hour + df_long["LAST_UPDATE_DT"].dt.minute / 60
