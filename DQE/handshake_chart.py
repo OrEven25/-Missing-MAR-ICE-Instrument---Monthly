@@ -19,15 +19,13 @@ df_long = df_long[df_long["ITEM"].isin(ITEMS)]
 # Parse dates and datetimes
 df_long["DATE"] = pd.to_datetime(df_long["DATE"], dayfirst=True)
 df_long = df_long.dropna(subset=["LAST_UPDATE"])
-df_long["LAST_UPDATE_DT"] = pd.to_datetime(df_long["LAST_UPDATE"], format="mixed", dayfirst=False, errors="coerce")
+df_long["LAST_UPDATE_DT"] = pd.to_datetime(df_long["LAST_UPDATE"], format="mixed", dayfirst=True, errors="coerce")
 df_long = df_long.dropna(subset=["LAST_UPDATE_DT"])
 
-# Extract time as decimal hours for y-axis (e.g. 07:30 → 7.5)
-df_long["HOUR"] = df_long["LAST_UPDATE_DT"].dt.hour + df_long["LAST_UPDATE_DT"].dt.minute / 60
-df_long["TIME_LABEL"] = df_long["LAST_UPDATE_DT"].dt.strftime("%H:%M")
+df_long["HOVER_LABEL"] = df_long["LAST_UPDATE_DT"].dt.strftime("%d/%m/%Y %H:%M")
 
 # One value per ITEM per DATE (take max if duplicates)
-df_long = df_long.groupby(["ITEM", "DATE"], as_index=False).agg({"HOUR": "max", "TIME_LABEL": "last"})
+df_long = df_long.groupby(["ITEM", "DATE"], as_index=False).agg({"LAST_UPDATE_DT": "max", "HOVER_LABEL": "last"})
 
 df_long = df_long.sort_values(["ITEM", "DATE"])
 
@@ -38,26 +36,22 @@ for item in df_long["ITEM"].unique():
     d = df_long[df_long["ITEM"] == item]
     fig.add_trace(go.Scatter(
         x=d["DATE"],
-        y=d["HOUR"],
+        y=d["LAST_UPDATE_DT"],          # full datetime on y-axis
         mode="lines+markers",
         name=item,
-        marker=dict(size=6),
+        marker=dict(size=8),
         line=dict(width=2),
         connectgaps=False,
         hovertemplate=(
             "<b>" + item + "</b><br>"
-            "Date: %{x|%d %b %Y}<br>"
-            "Last Update: %{customdata}<extra></extra>"
+            "Analysis Date: %{x|%d %b %Y}<br>"
+            "Completed: %{customdata}<extra></extra>"
         ),
-        customdata=d["TIME_LABEL"],
+        customdata=d["HOVER_LABEL"],
     ))
 
-# Y-axis: readable time labels
-tick_vals = list(range(0, 25))
-tick_text = [f"{h:02d}:00" for h in tick_vals]
-
 fig.update_layout(
-    title="Daily Last Update Time by Interface",
+    title="EOD2 Start & End — Full Completion Datetime by Analysis Date",
     xaxis=dict(
         title="Analysis Date",
         tickformat="%d %b",
@@ -65,8 +59,11 @@ fig.update_layout(
         tickfont=dict(size=12),
         dtick="D1",
     ),
-    yaxis_title="Last Update Time",
-    yaxis=dict(tickvals=tick_vals, ticktext=tick_text, range=[0, 24]),
+    yaxis=dict(
+        title="Actual Completion Date & Time",
+        tickformat="%d %b %H:%M",
+        tickfont=dict(size=11),
+    ),
     hovermode="x unified",
     template="plotly_white",
     height=600,
@@ -74,3 +71,4 @@ fig.update_layout(
 )
 
 fig.show()
+
