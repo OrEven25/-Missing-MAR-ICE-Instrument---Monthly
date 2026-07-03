@@ -20,10 +20,14 @@ df_long = df_long[df_long["ITEM"].isin(ITEMS)]
 df_long["DATE"] = pd.to_datetime(df_long["DATE"], dayfirst=True)
 df_long = df_long.dropna(subset=["LAST_UPDATE"])
 df_long["LAST_UPDATE_DT"] = pd.to_datetime(df_long["LAST_UPDATE"], format="mixed", dayfirst=False, errors="coerce")
+df_long = df_long.dropna(subset=["LAST_UPDATE_DT"])
 
 # Extract time as decimal hours for y-axis (e.g. 07:30 → 7.5)
 df_long["HOUR"] = df_long["LAST_UPDATE_DT"].dt.hour + df_long["LAST_UPDATE_DT"].dt.minute / 60
 df_long["TIME_LABEL"] = df_long["LAST_UPDATE_DT"].dt.strftime("%H:%M")
+
+# One value per ITEM per DATE (take max if duplicates)
+df_long = df_long.groupby(["ITEM", "DATE"], as_index=False).agg({"HOUR": "max", "TIME_LABEL": "last"})
 
 df_long = df_long.sort_values(["ITEM", "DATE"])
 
@@ -38,6 +42,8 @@ for item in df_long["ITEM"].unique():
         mode="lines+markers",
         name=item,
         marker=dict(size=6),
+        line=dict(width=2),
+        connectgaps=False,
         hovertemplate=(
             "<b>" + item + "</b><br>"
             "Date: %{x|%d %b %Y}<br>"
