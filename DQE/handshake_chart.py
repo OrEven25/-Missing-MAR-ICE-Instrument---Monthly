@@ -4,7 +4,7 @@ from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CSV_FILE = Path(__file__).parent / "handshake_data.csv"
-ITEMS = ["NORDPOOL", "EOD2_START", "EOD2_END", "EOD1_START", "EOD1_END"]
+ITEMS = ["EOD2_START", "EOD2_END"]
 # ─────────────────────────────────────────────────────────────────────────────
 
 df = pd.read_csv(CSV_FILE)
