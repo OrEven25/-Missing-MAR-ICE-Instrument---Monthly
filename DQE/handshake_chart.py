@@ -24,8 +24,11 @@ df_long = df_long.dropna(subset=["LAST_UPDATE_DT"])
 
 df_long["HOVER_LABEL"] = df_long["LAST_UPDATE_DT"].dt.strftime("%d/%m/%Y %H:%M")
 
+# Compute offset in hours from the analysis date
+df_long["OFFSET_HOURS"] = (df_long["LAST_UPDATE_DT"] - df_long["DATE"]).dt.total_seconds() / 3600
+
 # One value per ITEM per DATE (take max if duplicates)
-df_long = df_long.groupby(["ITEM", "DATE"], as_index=False).agg({"LAST_UPDATE_DT": "max", "HOVER_LABEL": "last"})
+df_long = df_long.groupby(["ITEM", "DATE"], as_index=False).agg({"OFFSET_HOURS": "max", "HOVER_LABEL": "last"})
 
 df_long = df_long.sort_values(["ITEM", "DATE"])
 
@@ -36,7 +39,7 @@ for item in df_long["ITEM"].unique():
     d = df_long[df_long["ITEM"] == item]
     fig.add_trace(go.Scatter(
         x=d["DATE"],
-        y=d["LAST_UPDATE_DT"],          # full datetime on y-axis
+        y=d["OFFSET_HOURS"],          # hours after analysis date
         mode="lines+markers",
         name=item,
         marker=dict(size=8),
@@ -51,7 +54,7 @@ for item in df_long["ITEM"].unique():
     ))
 
 fig.update_layout(
-    title="EOD2 Start & End — Full Completion Datetime by Analysis Date",
+    title="EOD2 Start & End — Hours After Analysis Date",
     xaxis=dict(
         title="Analysis Date",
         tickformat="%d %b",
@@ -60,8 +63,9 @@ fig.update_layout(
         dtick="D1",
     ),
     yaxis=dict(
-        title="Actual Completion Date & Time",
-        tickformat="%d %b %H:%M",
+        title="Hours After Analysis Date",
+        tickvals=list(range(0, 73, 6)),
+        ticktext=[f"+{h//24}d {h%24:02d}:00" for h in range(0, 73, 6)],
         tickfont=dict(size=11),
     ),
     hovermode="x unified",
