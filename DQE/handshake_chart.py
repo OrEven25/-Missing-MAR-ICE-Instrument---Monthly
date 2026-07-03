@@ -10,7 +10,7 @@ ITEMS = ["EOD2_START", "EOD2_END"]
 df = pd.read_csv(CSV_FILE)
 
 # Melt from wide (pivot) to long format
-date_cols = [c for c in df.columns if c != "ITEM"]
+date_cols = [c for c in df.columns if c != "ITEM" and not c.startswith("Unnamed")]
 df_long = df.melt(id_vars="ITEM", value_vars=date_cols, var_name="DATE", value_name="LAST_UPDATE")
 
 # Filter to selected items only
