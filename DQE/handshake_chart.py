@@ -52,7 +52,13 @@ tick_text = [f"{h:02d}:00" for h in tick_vals]
 
 fig.update_layout(
     title="Daily Last Update Time by Interface",
-    xaxis_title="Analysis Date",
+    xaxis=dict(
+        title="Analysis Date",
+        tickformat="%d %b",
+        tickangle=-45,
+        tickfont=dict(size=12),
+        dtick="D1",
+    ),
     yaxis_title="Last Update Time",
     yaxis=dict(tickvals=tick_vals, ticktext=tick_text, range=[0, 24]),
     hovermode="x unified",
