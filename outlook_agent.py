@@ -49,8 +49,14 @@ MAR_HEADERS = ["InstId", "Instname", "perid", "secondPeriod"]
 
 # ── Authentication ────────────────────────────────────────────────────────────
 
-def get_access_token():
-    """Return a valid access token, using cached credentials or device-code login."""
+def get_access_token(allow_interactive=True):
+    """Return a valid access token, using cached credentials or device-code login.
+
+    When allow_interactive is False, only a silent (cached) refresh is attempted —
+    used for the weekly keepalive runs so an unattended Friday never blocks on a
+    device-code prompt nobody is there to complete. Returns None on failure instead
+    of raising, so callers can treat it as "refresh didn't happen, try next week."
+    """
     cache = msal.SerializableTokenCache()
     if os.path.exists(TOKEN_CACHE_FILE):
         with open(TOKEN_CACHE_FILE, "r") as f:
@@ -68,6 +74,8 @@ def get_access_token():
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
 
     if not result:
+        if not allow_interactive:
+            return None
         flow = app.initiate_device_flow(scopes=SCOPES)
         if "user_code" not in flow:
             raise RuntimeError(f"Device flow failed: {flow}")
@@ -76,12 +84,14 @@ def get_access_token():
         print("=" * 60 + "\n")
         result = app.acquire_token_by_device_flow(flow)
 
-    if "access_token" not in result:
-        raise RuntimeError(f"Authentication failed: {result.get('error_description', result)}")
-
     if cache.has_state_changed:
         with open(TOKEN_CACHE_FILE, "w") as f:
             f.write(cache.serialize())
+
+    if not result or "access_token" not in result:
+        if not allow_interactive:
+            return None
+        raise RuntimeError(f"Authentication failed: {(result or {}).get('error_description', result)}")
 
     return result["access_token"]
 
@@ -283,12 +293,22 @@ def main(force_year=None, force_month=None):
     target_month = force_month or today.month
     month_label  = datetime(target_year, target_month, 1).strftime("%B %Y")
 
-    if force_year is None and force_month is None:
-        if not is_last_friday_today():
-            next_run = last_friday_of_month(today.year, today.month)
-            print(f"⏭ Today ({today}) is not the last Friday of {month_label}. "
-                  f"Next scheduled run: {next_run}. Exiting.")
-            return
+    is_scheduled_run = force_year is None and force_month is None
+    is_last = is_last_friday_today() if is_scheduled_run else True
+
+    if is_scheduled_run and not is_last:
+        # Every Friday (not just the last one) we still refresh the cached login
+        # silently, so the token never goes stale for a full month between real
+        # runs. No interactive fallback here — nobody is present to complete one.
+        print("🔑 Weekly keepalive: refreshing cached credentials silently...")
+        token = get_access_token(allow_interactive=False)
+        print("✅ Token refreshed." if token else "⚠ Silent refresh failed (no valid cached session yet).")
+        next_run = last_friday_of_month(today.year, today.month)
+        print(f"⏭ Today ({today}) is not the last Friday of {month_label}. "
+              f"Next scheduled run: {next_run}. Exiting.")
+        return
+
+    if is_scheduled_run:
         print(f"📅 Last Friday of {month_label} confirmed ({today}). Running agent...")
 
     print("🔑 Authenticating with Microsoft Graph...")
